@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(C:/Users/fsuterio/AppData/Local/Python/pythoncore-3.14-64/python.exe:*)",
+      "Bash(ls:*)",
+      "Bash(gh auth:*)",
+      "Bash(git init:*)",
+      "Bash(git:*)"
+    ]
+  }
+}
