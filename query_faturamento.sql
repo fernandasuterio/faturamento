@@ -72,6 +72,9 @@ SELECT
 FROM Base b
 LEFT JOIN PayloadKeyVals p
   ON b.SHP_SRM_PRIVN_TRANSACTION_ID = p.SHP_SRM_PRIVN_TRANSACTION_ID
-WHERE b.SHP_SRM_PRIVN_PRE_INVOICE_TYPE = 'regular'
+-- FILTRO DE TIPO: substituir o comentário abaixo pelo filtro desejado antes de executar
+-- Apenas regular:      WHERE b.SHP_SRM_PRIVN_PRE_INVOICE_TYPE = 'regular'
+-- Apenas complementar: WHERE b.SHP_SRM_PRIVN_PRE_INVOICE_TYPE = 'complementar'
+-- Ambos:               (sem WHERE aqui)
 GROUP BY b.Name, b.SHP_SRM_PRIVN_PRE_INVOICE_TYPE, b.INVOICE_IDENTIFIER_STATUS
 ORDER BY b.Name DESC, b.SHP_SRM_PRIVN_PRE_INVOICE_TYPE, b.INVOICE_IDENTIFIER_STATUS;
