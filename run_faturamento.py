@@ -350,7 +350,7 @@ def print_rv(vals_idx, periodos_rv, titulo, metrica_col, label_str):
 # ============================================================
 # Loop por tipo
 # ============================================================
-TIPOS = ['regular', 'complementar', 'ambos']
+TIPOS = ['regular', 'complementary', 'ambos']
 resultados = {}
 
 for TIPO in TIPOS:
@@ -361,6 +361,9 @@ for TIPO in TIPOS:
     if TIPO == 'ambos':
         filtro_tipo    = ''
         filtro_tipo_rv = ''
+    elif TIPO == 'complementary':
+        filtro_tipo    = "WHERE b.SHP_SRM_PRIVN_PRE_INVOICE_TYPE = 'complementary'"
+        filtro_tipo_rv = "WHERE SHP_SRM_PRIVN_PRE_INVOICE_TYPE = 'complementary'"
     else:
         filtro_tipo    = f"WHERE b.SHP_SRM_PRIVN_PRE_INVOICE_TYPE = '{TIPO}'"
         filtro_tipo_rv = f"WHERE SHP_SRM_PRIVN_PRE_INVOICE_TYPE = '{TIPO}'"
@@ -549,9 +552,9 @@ def exportar_excel(resultados, caminho):
     wb.remove(wb.active)  # remove aba padrao
 
     agora = datetime.datetime.now().strftime('%d/%m/%Y %H:%M')
-    NOMES_ABAS = {'regular': 'Regular', 'complementar': 'Complementar', 'ambos': 'Ambos'}
+    NOMES_ABAS = {'regular': 'Regular', 'complementary': 'Complementary', 'ambos': 'Ambos'}
 
-    for tipo in ['regular', 'complementar', 'ambos']:
+    for tipo in ['regular', 'complementary', 'ambos']:
         r  = resultados[tipo]
         ws = wb.create_sheet(title=NOMES_ABAS[tipo])
 
