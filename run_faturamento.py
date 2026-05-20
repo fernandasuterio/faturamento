@@ -529,9 +529,14 @@ df_provider_detalhe = (
     .sort_values('custo_total', ascending=False)
 )
 
-# Top providers: consolidado por provider (sem período) — maiores ofensores
+# Top providers: consolidado por provider (sem período) — excluir 2 últimos períodos
+_todos_periodos   = sorted(df_detalhe['periodo'].dropna().unique())
+_periodos_excl    = _todos_periodos[-2:] if len(_todos_periodos) >= 2 else []
+_excluidos_str    = ', '.join(_periodos_excl) if _periodos_excl else 'nenhum'
+_df_top_base      = df_detalhe[~df_detalhe['periodo'].isin(_periodos_excl)]
+
 _grp_grupo = (
-    df_detalhe
+    _df_top_base
     .groupby(['provider_id', 'provider_name', 'provider_type', 'status_grupo'], dropna=False)
     .agg(qtd_pi=('pre_invoice_id', 'nunique'), custo=('custo_total', 'sum'))
     .reset_index()
@@ -543,7 +548,7 @@ _outros_p = (_grp_grupo[_grp_grupo['status_grupo'] == 'Outros']
              [['provider_id','qtd_pi','custo']]
              .rename(columns={'qtd_pi':'qtd_pi_outros','custo':'custo_outros'}))
 _total_p  = (
-    df_detalhe
+    _df_top_base
     .groupby(['provider_id', 'provider_name', 'provider_type'], dropna=False)
     .agg(qtd_pi_total=('pre_invoice_id', 'nunique'),
          custo_total=('custo_total', 'sum'),
@@ -666,17 +671,19 @@ def write_rv_to_sheet(ws, vals_idx, periodos, titulo, metrica_col, label_str, ro
     return row_start + 1  # +1 linha vazia
 
 
-def write_top_providers_sheet(ws, df, agora):
+def write_top_providers_sheet(ws, df, agora, excluidos_str=''):
     """Aba 6 — Top Providers: consolidado sem período, maiores ofensores."""
     FILL_GRP_NULL   = PatternFill('solid', fgColor='FCE4D6')  # laranja — NULL
     FILL_GRP_OUTROS = PatternFill('solid', fgColor='E2EFDA')  # verde   — Outros
     FILL_GRP_TOTAL  = PatternFill('solid', fgColor='D6E4F0')  # azul    — Total
     FILL_ALT        = PatternFill('solid', fgColor='F5F5F5')
 
+    excl_label = f' | Excluindo 2 ultimos periodos: {excluidos_str}' if excluidos_str else ''
+
     # Linha 1: título
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=10)
     c = ws.cell(row=1, column=1,
-                value=f'Outros + NULL — Top Providers (todo 2026) | Extracao: {agora}')
+                value=f'Outros + NULL — Top Providers (todo 2026{excl_label}) | Extracao: {agora}')
     c.font = Font(bold=True, color='FFFFFF', size=11)
     c.fill = FILL_HEADER_ABA
     c.alignment = ALIGN_CENTER
@@ -806,7 +813,7 @@ def _write_detalhe_sheet(ws, df, titulo, colunas_df, headers, larguras, num_cols
     ws.freeze_panes = 'A4'
 
 
-def exportar_excel(resultados, caminho, df_detalhe=None, df_provider_detalhe=None, df_top_providers=None):
+def exportar_excel(resultados, caminho, df_detalhe=None, df_provider_detalhe=None, df_top_providers=None, excluidos_str=''):
     wb = Workbook()
     wb.remove(wb.active)  # remove aba padrao
 
@@ -934,7 +941,7 @@ def exportar_excel(resultados, caminho, df_detalhe=None, df_provider_detalhe=Non
     # ---- Aba 6: Top Providers ----
     if df_top_providers is not None and not df_top_providers.empty:
         ws_top = wb.create_sheet(title='Top Providers')
-        write_top_providers_sheet(ws_top, df_top_providers, agora)
+        write_top_providers_sheet(ws_top, df_top_providers, agora, excluidos_str)
 
     wb.save(caminho)
     print(f'\nExcel salvo em: {caminho}')
@@ -947,6 +954,6 @@ ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 downloads = os.path.join(os.path.expanduser('~'), 'Downloads')
 caminho_excel = os.path.join(downloads, f'faturamento_{ts}.xlsx')
 
-exportar_excel(resultados, caminho_excel, df_detalhe, df_provider_detalhe, df_top_providers)
+exportar_excel(resultados, caminho_excel, df_detalhe, df_provider_detalhe, df_top_providers, _excluidos_str)
 os.startfile(caminho_excel)
 print('\nConcluido.')
