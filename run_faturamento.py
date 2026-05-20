@@ -529,6 +529,41 @@ df_provider_detalhe = (
     .sort_values('custo_total', ascending=False)
 )
 
+# Top providers: consolidado por provider (sem período) — maiores ofensores
+_grp_grupo = (
+    df_detalhe
+    .groupby(['provider_id', 'provider_name', 'provider_type', 'status_grupo'], dropna=False)
+    .agg(qtd_pi=('pre_invoice_id', 'nunique'), custo=('custo_total', 'sum'))
+    .reset_index()
+)
+_null_p   = (_grp_grupo[_grp_grupo['status_grupo'] == 'NULL']
+             [['provider_id','qtd_pi','custo']]
+             .rename(columns={'qtd_pi':'qtd_pi_null','custo':'custo_null'}))
+_outros_p = (_grp_grupo[_grp_grupo['status_grupo'] == 'Outros']
+             [['provider_id','qtd_pi','custo']]
+             .rename(columns={'qtd_pi':'qtd_pi_outros','custo':'custo_outros'}))
+_total_p  = (
+    df_detalhe
+    .groupby(['provider_id', 'provider_name', 'provider_type'], dropna=False)
+    .agg(qtd_pi_total=('pre_invoice_id', 'nunique'),
+         custo_total=('custo_total', 'sum'),
+         qtd_transacoes_total=('qtd_transacoes', 'sum'))
+    .reset_index()
+)
+df_top_providers = (
+    _total_p
+    .merge(_null_p,   on='provider_id', how='left')
+    .merge(_outros_p, on='provider_id', how='left')
+    .fillna({'qtd_pi_null': 0, 'custo_null': 0,
+             'qtd_pi_outros': 0, 'custo_outros': 0})
+    .sort_values('custo_total', ascending=False)
+    .reset_index(drop=True)
+)
+_custo_geral = df_top_providers['custo_total'].sum()
+df_top_providers['pct_custo'] = (
+    df_top_providers['custo_total'] / _custo_geral if _custo_geral > 0 else 0
+)
+
 # ============================================================
 # Export Excel com openpyxl
 # ============================================================
@@ -631,6 +666,97 @@ def write_rv_to_sheet(ws, vals_idx, periodos, titulo, metrica_col, label_str, ro
     return row_start + 1  # +1 linha vazia
 
 
+def write_top_providers_sheet(ws, df, agora):
+    """Aba 6 — Top Providers: consolidado sem período, maiores ofensores."""
+    FILL_GRP_NULL   = PatternFill('solid', fgColor='FCE4D6')  # laranja — NULL
+    FILL_GRP_OUTROS = PatternFill('solid', fgColor='E2EFDA')  # verde   — Outros
+    FILL_GRP_TOTAL  = PatternFill('solid', fgColor='D6E4F0')  # azul    — Total
+    FILL_ALT        = PatternFill('solid', fgColor='F5F5F5')
+
+    # Linha 1: título
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=10)
+    c = ws.cell(row=1, column=1,
+                value=f'Outros + NULL — Top Providers (todo 2026) | Extracao: {agora}')
+    c.font = Font(bold=True, color='FFFFFF', size=11)
+    c.fill = FILL_HEADER_ABA
+    c.alignment = ALIGN_CENTER
+
+    # Linha 3: grupos de colunas (sub-cabeçalho)
+    grupos = [(4, 5, 'NULL',   FILL_GRP_NULL),
+              (6, 7, 'Outros', FILL_GRP_OUTROS),
+              (8, 10, 'TOTAL', FILL_GRP_TOTAL)]
+    for col_ini, col_fim, label, fill in grupos:
+        ws.merge_cells(start_row=3, start_column=col_ini,
+                       end_row=3, end_column=col_fim)
+        c = ws.cell(row=3, column=col_ini, value=label)
+        c.font = FONT_BOLD
+        c.fill = fill
+        c.alignment = ALIGN_CENTER
+    # células provider (cols 1-3) na linha 3 — fundo neutro
+    for j in range(1, 4):
+        ws.cell(row=3, column=j).fill = FILL_HEADER_COL
+
+    # Linha 4: headers das colunas
+    headers = ['Provider ID', 'Provider Name', 'Provider Type',
+               'Qtd Pre-Invoices', 'Custo (R$)',
+               'Qtd Pre-Invoices', 'Custo (R$)',
+               'Qtd Pre-Invoices', 'Custo (R$)', '% Custo']
+    for j, h in enumerate(headers, 1):
+        c = ws.cell(row=4, column=j, value=h)
+        c.font = FONT_WHITE_BOLD
+        c.fill = FILL_HEADER_COL
+        c.alignment = ALIGN_CENTER
+
+    # Dados
+    campos = ['provider_id', 'provider_name', 'provider_type',
+              'qtd_pi_null', 'custo_null',
+              'qtd_pi_outros', 'custo_outros',
+              'qtd_pi_total', 'custo_total', 'pct_custo']
+    for i, row in df.iterrows():
+        r = i + 5
+        alt = FILL_ALT if i % 2 == 0 else None
+        for j, campo in enumerate(campos, 1):
+            v = row[campo]
+            if not isinstance(v, str) and pd.isna(v):
+                v = None
+            cell = ws.cell(row=r, column=j, value=v)
+            cell.alignment = ALIGN_CENTER
+            if alt:
+                cell.fill = alt
+        ws.cell(row=r, column=2).alignment = ALIGN_LEFT
+        for col in [4, 6, 8]:
+            ws.cell(row=r, column=col).number_format = '#,##0'
+        for col in [5, 7, 9]:
+            ws.cell(row=r, column=col).number_format = '"R$ "#,##0.00'
+        ws.cell(row=r, column=10).number_format = '0.0%'
+
+    # Linha TOTAL
+    tr = len(df) + 5
+    for j in range(1, 11):
+        ws.cell(row=tr, column=j).fill = FILL_TOTAL
+        ws.cell(row=tr, column=j).font = FONT_BOLD
+    ws.cell(row=tr, column=1, value='TOTAL').alignment = ALIGN_CENTER
+    t_null_pi  = ws.cell(row=tr, column=4, value=int(df['qtd_pi_null'].sum()))
+    t_null_pi.number_format = '#,##0';   t_null_pi.alignment = ALIGN_CENTER
+    t_null_c   = ws.cell(row=tr, column=5, value=float(df['custo_null'].sum()))
+    t_null_c.number_format = '"R$ "#,##0.00'; t_null_c.alignment = ALIGN_CENTER
+    t_out_pi   = ws.cell(row=tr, column=6, value=int(df['qtd_pi_outros'].sum()))
+    t_out_pi.number_format = '#,##0';   t_out_pi.alignment = ALIGN_CENTER
+    t_out_c    = ws.cell(row=tr, column=7, value=float(df['custo_outros'].sum()))
+    t_out_c.number_format = '"R$ "#,##0.00'; t_out_c.alignment = ALIGN_CENTER
+    t_tot_pi   = ws.cell(row=tr, column=8, value=int(df['qtd_pi_total'].sum()))
+    t_tot_pi.number_format = '#,##0';   t_tot_pi.alignment = ALIGN_CENTER
+    t_tot_c    = ws.cell(row=tr, column=9, value=float(df['custo_total'].sum()))
+    t_tot_c.number_format = '"R$ "#,##0.00'; t_tot_c.alignment = ALIGN_CENTER
+    t_pct      = ws.cell(row=tr, column=10, value=1.0)
+    t_pct.number_format = '0.0%';       t_pct.alignment = ALIGN_CENTER
+
+    # Larguras e freeze
+    for j, w in enumerate([12, 42, 14, 16, 22, 16, 22, 16, 22, 10], 1):
+        ws.column_dimensions[get_column_letter(j)].width = w
+    ws.freeze_panes = 'A5'
+
+
 def _write_detalhe_sheet(ws, df, titulo, colunas_df, headers, larguras, num_cols, fill_styles):
     """Escreve uma aba de detalhe genérica."""
     FILL_ABA, FILL_HDR, FILL_ALT, FILL_NULL, FILL_OUTROS = fill_styles
@@ -680,7 +806,7 @@ def _write_detalhe_sheet(ws, df, titulo, colunas_df, headers, larguras, num_cols
     ws.freeze_panes = 'A4'
 
 
-def exportar_excel(resultados, caminho, df_detalhe=None, df_provider_detalhe=None):
+def exportar_excel(resultados, caminho, df_detalhe=None, df_provider_detalhe=None, df_top_providers=None):
     wb = Workbook()
     wb.remove(wb.active)  # remove aba padrao
 
@@ -805,6 +931,11 @@ def exportar_excel(resultados, caminho, df_detalhe=None, df_provider_detalhe=Non
                 campos_prv, headers_prv, larg_prv, num_prv, fill_styles
             )
 
+    # ---- Aba 6: Top Providers ----
+    if df_top_providers is not None and not df_top_providers.empty:
+        ws_top = wb.create_sheet(title='Top Providers')
+        write_top_providers_sheet(ws_top, df_top_providers, agora)
+
     wb.save(caminho)
     print(f'\nExcel salvo em: {caminho}')
 
@@ -816,6 +947,6 @@ ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 downloads = os.path.join(os.path.expanduser('~'), 'Downloads')
 caminho_excel = os.path.join(downloads, f'faturamento_{ts}.xlsx')
 
-exportar_excel(resultados, caminho_excel, df_detalhe, df_provider_detalhe)
+exportar_excel(resultados, caminho_excel, df_detalhe, df_provider_detalhe, df_top_providers)
 os.startfile(caminho_excel)
 print('\nConcluido.')
