@@ -6,6 +6,9 @@
 --   - TAC-CPF com status NULL → 'nao_emite_nfs' (se tiver status real, mantém o original)
 --   - sap_status_pago_realizado + sap_status_pagado → consolidados em 'sap_status_pago_realizado'
 --   - Sempre os 5 últimos períodos (dinâmico)
+-- ATENÇÃO: BT_SRM_INVOICE_FILE_TRACEABILITY tem N linhas por pre-invoice (log de eventos).
+--          Usar sempre a CTE TraceDedup abaixo para evitar multiplicação de custos.
+-- Tipos válidos: 'regular' | 'complementary' (inglês — nunca 'complementar')
 
 WITH TopPeriods AS (
   SELECT DISTINCT JSON_EXTRACT_SCALAR(SHP_SRM_PRIVN_PERIOD, '$.name') AS Name
@@ -24,6 +27,17 @@ LatestVersion AS (
   GROUP BY SHP_SRM_PRIVN_TRANSACTION_ID
 ),
 
+-- Deduplica traceability: 1 linha por pre-invoice (status mais recente)
+TraceDedup AS (
+  SELECT PREINVOICE_ID, INVOICE_IDENTIFIER_STATUS
+  FROM (
+    SELECT PREINVOICE_ID, INVOICE_IDENTIFIER_STATUS,
+           ROW_NUMBER() OVER (PARTITION BY PREINVOICE_ID ORDER BY INVOICE_LAST_UPDATE DESC) AS rn
+    FROM WHOWNER.BT_SRM_INVOICE_FILE_TRACEABILITY
+  )
+  WHERE rn = 1
+),
+
 Base AS (
   SELECT
     C.SHP_SRM_PRIVN_TRANSACTION_ID,
@@ -31,7 +45,6 @@ Base AS (
     C.SHP_SRM_PRIVN_COST_AMT,
     C.SHP_SRM_PRIVN_PRE_INVOICE_TYPE,
     C.SHP_SRM_PRIVN_PRE_INVOICE_ID,
-    C.SHP_SRM_PRIVN_RELATED_PERIOD_ID,
     C.SHP_SRM_PRIVN_PAYLOAD,
     PRV.TYPE AS PROVIDER_TYPE,
     CASE
@@ -47,7 +60,7 @@ Base AS (
     ON JSON_EXTRACT_SCALAR(C.SHP_SRM_PRIVN_PERIOD, '$.name') = TP.Name
   JOIN WHOWNER.BT_SHP_SRM_PROVIDERS PRV
     ON C.SHP_SRM_PRIVN_PROVIDER_ID = PRV.ID
-  LEFT JOIN WHOWNER.BT_SRM_INVOICE_FILE_TRACEABILITY T
+  LEFT JOIN TraceDedup T
     ON CAST(C.SHP_SRM_PRIVN_PRE_INVOICE_ID AS STRING) = T.PREINVOICE_ID
   WHERE C.SHP_SRM_PRIVN_EVENT_STATUS = 'PROCESSED'
     AND PRV.TYPE IN ('TAC-CNPJ', 'TAC-CPF', 'ETC', 'MEI')
@@ -73,8 +86,8 @@ FROM Base b
 LEFT JOIN PayloadKeyVals p
   ON b.SHP_SRM_PRIVN_TRANSACTION_ID = p.SHP_SRM_PRIVN_TRANSACTION_ID
 -- FILTRO DE TIPO: substituir o comentário abaixo pelo filtro desejado antes de executar
--- Apenas regular:      WHERE b.SHP_SRM_PRIVN_PRE_INVOICE_TYPE = 'regular'
--- Apenas complementar: WHERE b.SHP_SRM_PRIVN_PRE_INVOICE_TYPE = 'complementar'
--- Ambos:               (sem WHERE aqui)
+-- Apenas regular:       WHERE b.SHP_SRM_PRIVN_PRE_INVOICE_TYPE = 'regular'
+-- Apenas complementary: WHERE b.SHP_SRM_PRIVN_PRE_INVOICE_TYPE = 'complementary'
+-- Ambos:                (sem WHERE aqui)
 GROUP BY b.Name, b.SHP_SRM_PRIVN_PRE_INVOICE_TYPE, b.INVOICE_IDENTIFIER_STATUS
-ORDER BY b.Name DESC, b.SHP_SRM_PRIVN_PRE_INVOICE_TYPE, b.INVOICE_IDENTIFIER_STATUS;
+ORDER BY b.Name ASC, b.SHP_SRM_PRIVN_PRE_INVOICE_TYPE, b.INVOICE_IDENTIFIER_STATUS;
