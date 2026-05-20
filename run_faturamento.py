@@ -368,6 +368,11 @@ for TIPO in TIPOS:
     df_rv_mensal = client.query(query_rv_mensal).to_dataframe()
     print(f'Linhas: {len(df_rv_mensal)}')
 
+    if df.empty:
+        print(f'Sem dados para tipo "{TIPO}". Pulando...')
+        resultados[TIPO] = {'sem_dados': True}
+        continue
+
     # Pivots semanais
     df['status_norm'] = df['INVOICE_IDENTIFIER_STATUS'].apply(normalizar_status)
     periodos = sorted(df['Name'].unique())
@@ -531,6 +536,12 @@ def exportar_excel(resultados, caminho):
     for tipo in ['regular', 'complementar', 'ambos']:
         r  = resultados[tipo]
         ws = wb.create_sheet(title=NOMES_ABAS[tipo])
+
+        if r.get('sem_dados'):
+            cell = ws.cell(row=1, column=1, value=f'Sem dados para pre-invoices do tipo "{tipo}".')
+            cell.font = FONT_BOLD
+            ws.column_dimensions['A'].width = 50
+            continue
 
         periodos_s    = r['periodos']
         periodos_m    = r['periodos_m']
