@@ -250,6 +250,75 @@ GROUP BY Month
 ORDER BY Month ASC
 """
 
+_OUTROS_SQL = (
+    "'accounting_document_update', 'accounting_error', 'accounting_sent_sap', "
+    "'escalated_to_external_team', 'validate_files_fail', "
+    "'validate_provision_success', 'preconciliation_ok_invoice'"
+)
+
+QUERY_DETALHE = f"""
+WITH TopPeriods AS (
+  SELECT DISTINCT JSON_EXTRACT_SCALAR(SHP_SRM_PRIVN_PERIOD, '$.name') AS Name
+  FROM WHOWNER.BT_SRM_PRE_INVOICE_ASSIGNED_EVENT_COST_ENTITIES
+  WHERE SHP_SRM_PRIVN_EVENT_STATUS = 'PROCESSED'
+  ORDER BY Name DESC
+  LIMIT 5
+),
+LatestVersion AS (
+  SELECT SHP_SRM_PRIVN_TRANSACTION_ID, MAX(SHP_SRM_PRIVN_VERSION_ID) AS MaxVersion
+  FROM WHOWNER.BT_SRM_PRE_INVOICE_ASSIGNED_EVENT_COST_ENTITIES
+  WHERE SHP_SRM_PRIVN_EVENT_STATUS = 'PROCESSED'
+  GROUP BY SHP_SRM_PRIVN_TRANSACTION_ID
+),
+TraceDetailed AS (
+  SELECT PREINVOICE_ID, INVOICE_IDENTIFIER_STATUS, INVOICE_ID,
+         FILE_STATUS, FILE_ACCOUNTING_DOCUMENT, INVOICE_LAST_UPDATE, INVOICE_AMOUNT
+  FROM (
+    SELECT PREINVOICE_ID, INVOICE_IDENTIFIER_STATUS, INVOICE_ID,
+           FILE_STATUS, FILE_ACCOUNTING_DOCUMENT, INVOICE_LAST_UPDATE, INVOICE_AMOUNT,
+           ROW_NUMBER() OVER (PARTITION BY PREINVOICE_ID ORDER BY INVOICE_LAST_UPDATE DESC) AS rn
+    FROM WHOWNER.BT_SRM_INVOICE_FILE_TRACEABILITY
+  )
+  WHERE rn = 1
+)
+SELECT
+  JSON_EXTRACT_SCALAR(C.SHP_SRM_PRIVN_PERIOD, '$.name')               AS periodo,
+  SUBSTR(JSON_EXTRACT_SCALAR(C.SHP_SRM_PRIVN_PERIOD, '$.name'), 1, 6) AS mes,
+  C.SHP_SRM_PRIVN_PRE_INVOICE_TYPE                                     AS tipo,
+  C.SHP_SRM_PRIVN_PRE_INVOICE_ID                                       AS pre_invoice_id,
+  PRV.ID                                                                AS provider_id,
+  PRV.NAME                                                              AS provider_name,
+  PRV.TYPE                                                              AS provider_type,
+  CASE WHEN T.INVOICE_IDENTIFIER_STATUS IS NULL THEN 'NULL' ELSE 'Outros' END AS status_grupo,
+  T.INVOICE_IDENTIFIER_STATUS                                           AS status_original,
+  SUM(C.SHP_SRM_PRIVN_COST_AMT)                                        AS custo_total,
+  COUNT(DISTINCT C.SHP_SRM_PRIVN_TRANSACTION_ID)                       AS qtd_transacoes,
+  MAX(CAST(T.INVOICE_ID AS STRING))                                     AS invoice_id,
+  MAX(T.FILE_STATUS)                                                    AS file_status,
+  MAX(T.FILE_ACCOUNTING_DOCUMENT)                                       AS sap_doc_contabil,
+  MAX(T.INVOICE_AMOUNT)                                                 AS invoice_amount,
+  MAX(T.INVOICE_LAST_UPDATE)                                           AS ultima_atualizacao
+FROM WHOWNER.BT_SRM_PRE_INVOICE_ASSIGNED_EVENT_COST_ENTITIES C
+JOIN LatestVersion LV
+  ON C.SHP_SRM_PRIVN_TRANSACTION_ID = LV.SHP_SRM_PRIVN_TRANSACTION_ID
+ AND C.SHP_SRM_PRIVN_VERSION_ID = LV.MaxVersion
+JOIN TopPeriods TP
+  ON JSON_EXTRACT_SCALAR(C.SHP_SRM_PRIVN_PERIOD, '$.name') = TP.Name
+JOIN WHOWNER.BT_SHP_SRM_PROVIDERS PRV
+  ON C.SHP_SRM_PRIVN_PROVIDER_ID = PRV.ID
+LEFT JOIN TraceDetailed T
+  ON CAST(C.SHP_SRM_PRIVN_PRE_INVOICE_ID AS STRING) = T.PREINVOICE_ID
+WHERE C.SHP_SRM_PRIVN_EVENT_STATUS = 'PROCESSED'
+  AND PRV.TYPE IN ('TAC-CNPJ', 'TAC-CPF', 'ETC', 'MEI')
+  AND (
+    (T.INVOICE_IDENTIFIER_STATUS IS NULL AND PRV.TYPE != 'TAC-CPF')
+    OR T.INVOICE_IDENTIFIER_STATUS IN ({_OUTROS_SQL})
+  )
+GROUP BY periodo, mes, tipo, pre_invoice_id, provider_id, provider_name, provider_type,
+         status_grupo, status_original
+ORDER BY custo_total DESC
+"""
+
 # ============================================================
 # Constantes de processamento
 # ============================================================
@@ -446,6 +515,29 @@ for TIPO in TIPOS:
     }
 
 # ============================================================
+# Query de detalhe: Outros + NULL (todos os tipos)
+# ============================================================
+print('\n' + '#'*85)
+print('# Executando query de detalhe: Outros + NULL')
+print('#'*85)
+df_detalhe = client.query(QUERY_DETALHE).to_dataframe()
+print(f'Linhas detalhe: {len(df_detalhe)} | Pre-invoices: {df_detalhe["pre_invoice_id"].nunique()} | Providers: {df_detalhe["provider_id"].nunique()}')
+
+# Provider level: agregar df_detalhe por provider × periodo × status
+df_provider_detalhe = (
+    df_detalhe
+    .groupby(['provider_id', 'provider_name', 'provider_type',
+              'periodo', 'mes', 'status_grupo', 'status_original'], dropna=False)
+    .agg(
+        qtd_pre_invoices=('pre_invoice_id', 'nunique'),
+        custo_total=('custo_total', 'sum'),
+        qtd_transacoes=('qtd_transacoes', 'sum'),
+    )
+    .reset_index()
+    .sort_values('custo_total', ascending=False)
+)
+
+# ============================================================
 # Export Excel com openpyxl
 # ============================================================
 FILL_HEADER_ABA = PatternFill('solid', fgColor='002060')  # azul escuro MeLi
@@ -547,7 +639,56 @@ def write_rv_to_sheet(ws, vals_idx, periodos, titulo, metrica_col, label_str, ro
     return row_start + 1  # +1 linha vazia
 
 
-def exportar_excel(resultados, caminho):
+def _write_detalhe_sheet(ws, df, titulo, colunas_df, headers, larguras, num_cols, fill_styles):
+    """Escreve uma aba de detalhe genérica."""
+    FILL_ABA, FILL_HDR, FILL_ALT, FILL_NULL, FILL_OUTROS = fill_styles
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
+    c = ws.cell(row=1, column=1, value=titulo)
+    c.font = Font(bold=True, color='FFFFFF', size=11)
+    c.fill = FILL_ABA
+    c.alignment = ALIGN_CENTER
+
+    for j, h in enumerate(headers, 1):
+        cell = ws.cell(row=3, column=j, value=h)
+        cell.font = FONT_WHITE_BOLD
+        cell.fill = FILL_HDR
+        cell.alignment = ALIGN_CENTER
+
+    for i, row in df.reset_index(drop=True).iterrows():
+        r = i + 4
+        grupo = str(row.get('status_grupo', '')) if pd.notna(row.get('status_grupo', None)) else 'NULL'
+        if grupo == 'NULL':
+            row_fill = FILL_NULL
+        elif grupo == 'Outros':
+            row_fill = FILL_OUTROS
+        else:
+            row_fill = FILL_ALT if i % 2 == 0 else None
+
+        for j, campo in enumerate(colunas_df, 1):
+            v = row.get(campo)
+            if not isinstance(v, str) and pd.isna(v):
+                v = None
+            cell = ws.cell(row=r, column=j, value=v)
+            cell.alignment = ALIGN_CENTER
+            if row_fill:
+                cell.fill = row_fill
+
+        # Formatos específicos
+        c_custo = ws.cell(row=r, column=num_cols['custo'])
+        c_custo.number_format = '"R$ "#,##0.00'
+        if 'invoice_amount' in num_cols:
+            c_inv = ws.cell(row=r, column=num_cols['invoice_amount'])
+            c_inv.number_format = '"R$ "#,##0.00'
+        # Nome do provider alinhado à esquerda
+        if 'provider_name' in num_cols:
+            ws.cell(row=r, column=num_cols['provider_name']).alignment = ALIGN_LEFT
+
+    for j, w in enumerate(larguras, 1):
+        ws.column_dimensions[get_column_letter(j)].width = w
+    ws.freeze_panes = 'A4'
+
+
+def exportar_excel(resultados, caminho, df_detalhe=None, df_provider_detalhe=None):
     wb = Workbook()
     wb.remove(wb.active)  # remove aba padrao
 
@@ -614,6 +755,64 @@ def exportar_excel(resultados, caminho):
         for col_idx in range(2, n_cols_max + 1):
             ws.column_dimensions[get_column_letter(col_idx)].width = 18
 
+    # ---- Abas de detalhe Outros + NULL ----
+    if df_detalhe is not None and not df_detalhe.empty:
+        FILL_NULL   = PatternFill('solid', fgColor='FCE4D6')  # laranja claro — NULL
+        FILL_OUTROS = PatternFill('solid', fgColor='E2EFDA')  # verde claro  — Outros
+        fill_styles = (FILL_HEADER_ABA, FILL_HEADER_COL, FILL_HEADER_COL, FILL_NULL, FILL_OUTROS)
+
+        # Aba: Pre-Fatura
+        ws_pf = wb.create_sheet(title='Outros+NULL — Pre-Fatura')
+        headers_pf = [
+            'Periodo', 'Mes', 'Tipo', 'Pre-Invoice ID',
+            'Provider ID', 'Provider Name', 'Provider Type',
+            'Status Grupo', 'Status Original',
+            'Custo Total (R$)', 'Qtd Transacoes',
+            'Invoice ID', 'File Status', 'SAP Doc Contabil',
+            'Invoice Amount (R$)', 'Ultima Atualizacao',
+        ]
+        campos_pf = [
+            'periodo', 'mes', 'tipo', 'pre_invoice_id',
+            'provider_id', 'provider_name', 'provider_type',
+            'status_grupo', 'status_original',
+            'custo_total', 'qtd_transacoes',
+            'invoice_id', 'file_status', 'sap_doc_contabil',
+            'invoice_amount', 'ultima_atualizacao',
+        ]
+        larg_pf = [12, 8, 14, 16, 12, 42, 14, 10, 35, 22, 14, 14, 30, 20, 20, 22]
+        num_pf  = {'custo': campos_pf.index('custo_total') + 1,
+                   'invoice_amount': campos_pf.index('invoice_amount') + 1,
+                   'provider_name': campos_pf.index('provider_name') + 1}
+        _write_detalhe_sheet(
+            ws_pf, df_detalhe,
+            f'Outros + NULL — Detalhe por Pre-Fatura | {agora}',
+            campos_pf, headers_pf, larg_pf, num_pf, fill_styles
+        )
+
+        # Aba: Provider
+        if df_provider_detalhe is not None and not df_provider_detalhe.empty:
+            ws_prv = wb.create_sheet(title='Outros+NULL — Provider')
+            headers_prv = [
+                'Provider ID', 'Provider Name', 'Provider Type',
+                'Periodo', 'Mes',
+                'Status Grupo', 'Status Original',
+                'Qtd Pre-Invoices', 'Qtd Transacoes', 'Custo Total (R$)',
+            ]
+            campos_prv = [
+                'provider_id', 'provider_name', 'provider_type',
+                'periodo', 'mes',
+                'status_grupo', 'status_original',
+                'qtd_pre_invoices', 'qtd_transacoes', 'custo_total',
+            ]
+            larg_prv = [12, 42, 14, 12, 8, 10, 35, 16, 16, 22]
+            num_prv  = {'custo': campos_prv.index('custo_total') + 1,
+                        'provider_name': campos_prv.index('provider_name') + 1}
+            _write_detalhe_sheet(
+                ws_prv, df_provider_detalhe,
+                f'Outros + NULL — Detalhe por Provider | {agora}',
+                campos_prv, headers_prv, larg_prv, num_prv, fill_styles
+            )
+
     wb.save(caminho)
     print(f'\nExcel salvo em: {caminho}')
 
@@ -625,6 +824,6 @@ ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 downloads = os.path.join(os.path.expanduser('~'), 'Downloads')
 caminho_excel = os.path.join(downloads, f'faturamento_{ts}.xlsx')
 
-exportar_excel(resultados, caminho_excel)
+exportar_excel(resultados, caminho_excel, df_detalhe, df_provider_detalhe)
 os.startfile(caminho_excel)
 print('\nConcluido.')
